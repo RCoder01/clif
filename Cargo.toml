@@ -1,0 +1,10 @@
+[package]
+name = "clif"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = "1.0.95"
+arrayvec = "0.7.6"
+clap = { version = "4", features = ["derive"] }
+
