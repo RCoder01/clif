@@ -42,6 +42,7 @@ macro_rules! families {
 pub static FAMILY_MAP: LazyLock<HashMap<u32, Family>> =
     LazyLock::new(|| FAMILIES.iter().map(|family| (family.id, *family)).collect());
 
+// https://github.com/microsoft/uf2/blob/master/utils/uf2families.json
 pub const FAMILIES: &'static [Family] = families![
     {
         "id": "0x16573617",
