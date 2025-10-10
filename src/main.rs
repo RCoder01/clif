@@ -2,6 +2,10 @@ use arrayvec::ArrayVec;
 use clap::{Args, Parser};
 use std::fs::File;
 use std::io::{BufReader, BufWriter, Read, Write};
+use std::num::ParseIntError;
+use std::ops::Range;
+
+use anyhow::{ensure, Context as _};
 
 use crate::families::FAMILY_MAP;
 
@@ -16,6 +20,7 @@ enum ClifArgs {
     Combine(CombineArgs),
     Generate(GenerateArgs),
     Read(ReadArgs),
+    Extract(ExtractArgs),
 }
 
 /// Combine multiple uf2 files into one
@@ -33,11 +38,11 @@ struct GenerateArgs {
     input: String,
     #[arg(short, long)]
     output: String,
-    #[arg(short, long, default_value_t = 1)]
+    #[arg(short, long, default_value_t = 1, value_parser=parse_multibase_u32)]
     page_size: u32,
-    #[arg(short, long)]
+    #[arg(short, long, value_parser=parse_multibase_u32)]
     family: Option<u32>,
-    #[arg(short, long, default_value_t = 0)]
+    #[arg(short, long, default_value_t = 0, value_parser=parse_multibase_u32)]
     target_addr_start: u32,
 }
 
@@ -49,6 +54,47 @@ struct ReadArgs {
     verbose: bool,
 }
 
+/// Extract binary data from uf2 files
+#[derive(Args)]
+struct ExtractArgs {
+    #[arg(short, long)]
+    input: String,
+    #[arg(short, long)]
+    output: String,
+    #[arg(short, long, value_parser=parse_multibase_u32)]
+    start_addr: u32,
+    #[arg(short, long, value_parser=parse_multibase_u32)]
+    end_addr: u32,
+    #[arg(short, long, default_value_t = 0, value_parser=parse_multibase_u8)]
+    /// Default value used if uf2 does not specify a value for this address
+    fill_value: u8,
+}
+
+pub const fn split_radix(s: &str) -> (&str, u32) {
+    let Some((prefix, val)) = s.split_at_checked(2) else {
+        return (s, 10);
+    };
+    if prefix.eq_ignore_ascii_case("0x") {
+        (val, 16)
+    } else if prefix.eq_ignore_ascii_case("0o") {
+        (val, 8)
+    } else if prefix.eq_ignore_ascii_case("0b") {
+        (val, 2)
+    } else {
+        (s, 10)
+    }
+}
+
+pub const fn parse_multibase_u32(s: &str) -> Result<u32, ParseIntError> {
+    let (val, radix) = split_radix(s);
+    u32::from_str_radix(val, radix)
+}
+
+pub const fn parse_multibase_u8(s: &str) -> Result<u8, ParseIntError> {
+    let (val, radix) = split_radix(s);
+    u8::from_str_radix(val, radix)
+}
+
 #[derive(Clone, Debug)]
 struct UF2Block {
     flags: u32,
@@ -58,10 +104,6 @@ struct UF2Block {
     num_blocks: u32,
     file_size: u32,
     data: [u8; MAX_PAYLOAD_SIZE],
-}
-
-fn err<T>(err: String) -> anyhow::Result<T> {
-    return anyhow::Result::Err(anyhow::Error::msg(err));
 }
 
 impl UF2Block {
@@ -106,24 +148,21 @@ impl UF2Block {
         let magic_start_0 = u32::from_le_bytes(block[..4].try_into().unwrap());
         let magic_start_1 = u32::from_le_bytes(block[4..8].try_into().unwrap());
         let magic_end = u32::from_le_bytes(block[CHUNK_SIZE - 4..].try_into().unwrap());
-        if magic_start_0 != Self::MAGIC_START_0 {
-            return err(format!(
-                "Incorrect magic start 0 (expected 0x{:08X}, found 0x{magic_start_0:08X})",
-                Self::MAGIC_START_0
-            ));
-        }
-        if magic_start_1 != Self::MAGIC_START_1 {
-            return err(format!(
-                "Incorrect magic start 1 (expected 0x{:08X}, found 0x{magic_start_1:08X})",
-                Self::MAGIC_START_1
-            ));
-        }
-        if magic_end != Self::MAGIC_END {
-            return err(format!(
-                "Incorrect magic end (expected 0x{:08X}, found 0x{magic_end:08X})",
-                Self::MAGIC_END
-            ));
-        }
+        ensure!(
+            magic_start_0 == Self::MAGIC_START_0,
+            "Incorrect magic start 0 (expected 0x{:08X}, found 0x{magic_start_0:08X})",
+            Self::MAGIC_START_0
+        );
+        ensure!(
+            magic_start_1 == Self::MAGIC_START_1,
+            "Incorrect magic start 1 (expected 0x{:08X}, found 0x{magic_start_1:08X})",
+            Self::MAGIC_START_1
+        );
+        ensure!(
+            magic_end == Self::MAGIC_END,
+            "Incorrect magic end (expected 0x{:08X}, found 0x{magic_end:08X})",
+            Self::MAGIC_END
+        );
         Ok(Self {
             flags: u32::from_le_bytes(block[8..12].try_into().unwrap()),
             target_addr: u32::from_le_bytes(block[12..16].try_into().unwrap()),
@@ -133,6 +172,10 @@ impl UF2Block {
             file_size: u32::from_le_bytes(block[28..32].try_into().unwrap()),
             data: block[32..CHUNK_SIZE - 4].try_into().unwrap(),
         })
+    }
+
+    fn payload(&self) -> &[u8] {
+        &self.data[..self.payload_size as usize]
     }
 }
 
@@ -303,42 +346,54 @@ fn write_extension(
 }
 
 fn combine(args: CombineArgs) -> anyhow::Result<()> {
-    let mut output = BufWriter::new(File::create(args.output)?);
-    let mut buf = [0; CHUNK_SIZE];
+    let mut output =
+        BufWriter::new(File::create(args.output).context("Failed to create output file")?);
     for file in args.inputs {
-        let mut input = BufReader::new(File::open(file)?);
-        input.read_exact(&mut buf)?;
-        output.write_all(&buf)?;
+        let mut input = BufReader::new(
+            File::open(&file).with_context(|| format!("Failed to open input file {file}"))?,
+        );
+        std::io::copy(&mut input, &mut output).with_context(|| {
+            format!("Failed to copy data from input file {file} to output file")
+        })?;
     }
     Ok(())
 }
 
 fn generate(mut args: GenerateArgs) -> anyhow::Result<()> {
-    let mut input = BufReader::new(File::open(args.input)?);
-    let mut len = input.get_ref().metadata()?.len().try_into()?;
+    let mut input = BufReader::new(File::open(args.input).context("Failed to open input file")?);
+    let mut len: u32 = input
+        .get_ref()
+        .metadata()
+        .context("Failed to get input file metadata")?
+        .len()
+        .try_into()?;
     if args.page_size > MAX_PAYLOAD_SIZE as u32 {
         args.page_size = 1;
     }
-    if len % args.page_size != 0 {
-        return err(format!(
-            "Cannot write binary of len: {len} to device with page size: {}",
-            args.page_size
-        ));
-    }
+    ensure!(
+        len.is_multiple_of(args.page_size),
+        "Cannot write binary of len: {len} to device with page size: {}",
+        args.page_size
+    );
     let payload_size = args.page_size * (MAX_PAYLOAD_SIZE as u32 / args.page_size);
     let mut block = UF2Block::new(payload_size, len);
     if let Some(family) = args.family {
         block.set_family(family);
     }
     block.target_addr = args.target_addr_start;
-    let mut output = BufWriter::new(File::create(args.output)?);
+    let mut output =
+        BufWriter::new(File::create(args.output).context("Failed to create output file")?);
     while len > 0 {
         if len < payload_size {
             block.payload_size = len;
         }
         len -= block.payload_size;
-        input.read_exact(&mut block.data[..block.payload_size as usize])?;
-        output.write_all(&block.as_chunk())?;
+        input
+            .read_exact(&mut block.data[..block.payload_size as usize])
+            .context("Failed to read UF2 Block data from input")?;
+        output
+            .write_all(&block.as_chunk())
+            .context("Failed to write UF2 block to output")?;
         block.block_no += 1;
         block.target_addr += block.payload_size;
     }
@@ -346,19 +401,79 @@ fn generate(mut args: GenerateArgs) -> anyhow::Result<()> {
 }
 
 fn read(args: ReadArgs) -> anyhow::Result<()> {
-    let mut input = BufReader::new(File::open(&args.input)?);
-    let len: usize = input.get_ref().metadata()?.len().try_into()?;
-    if len % CHUNK_SIZE != 0 {
-        return err(format!(
-            "Cannot read {} of len {len}. Must be a multiple of {CHUNK_SIZE}",
-            args.input
-        ));
-    }
+    let mut input = BufReader::new(File::open(&args.input).context("Failed to open input file")?);
+    let len: usize = input
+        .get_ref()
+        .metadata()
+        .context("Failed to get metadata for input file")?
+        .len()
+        .try_into()?;
+    ensure!(
+        len.is_multiple_of(CHUNK_SIZE),
+        "Cannot read {} of len {len}. Must be a multiple of {CHUNK_SIZE}",
+        args.input
+    );
     let mut buf = [0u8; CHUNK_SIZE];
     while let Ok(()) = input.read_exact(&mut buf) {
-        let block = UF2Block::read(&buf)?;
-        display_block(block, &mut std::io::stdout(), args.verbose)?;
+        let block = UF2Block::read(&buf).context("Failed to parse UF2 Block")?;
+        display_block(block, &mut std::io::stdout(), args.verbose)
+            .context("Failed to write to stdout")?;
     }
+    Ok(())
+}
+
+fn range_add(mut range: Range<u32>, offset: u32) -> Range<u32> {
+    range.start += offset;
+    range.end += offset;
+    range
+}
+
+fn range_sub(mut range: Range<u32>, offset: u32) -> Range<u32> {
+    range.start -= offset;
+    range.end -= offset;
+    range
+}
+
+fn range_intersect(a: Range<u32>, b: Range<u32>) -> Range<u32> {
+    u32::max(a.start, b.start)..u32::min(a.end, b.end)
+}
+
+fn range_index(r: Range<u32>) -> Range<usize> {
+    r.start as usize..r.end as usize
+}
+
+fn extract(args: ExtractArgs) -> anyhow::Result<()> {
+    let mut input = BufReader::new(File::open(&args.input).context("Failed to open input file")?);
+    let len: usize = input
+        .get_ref()
+        .metadata()
+        .context("Failed to get metadata for input file")?
+        .len()
+        .try_into()?;
+    ensure!(
+        len.is_multiple_of(CHUNK_SIZE),
+        "Cannot read {} of len {len}. Must be a multiple of {CHUNK_SIZE}",
+        args.input
+    );
+    let output_range = args.start_addr..args.end_addr;
+    let mut input_buf = [0u8; CHUNK_SIZE];
+    let mut output_buf = vec![args.fill_value; output_range.len()];
+    while let Ok(()) = input.read_exact(&mut input_buf) {
+        let block = UF2Block::read(&input_buf).context("Failed to parse UF2 block")?;
+        let block_range = range_add(0..block.payload_size, block.target_addr);
+        let intersect_range = range_intersect(output_range.clone(), block_range);
+        if intersect_range.is_empty() {
+            continue;
+        }
+        let block_rel_intersection = range_sub(intersect_range.clone(), block.target_addr);
+        let output_rel_intersection = range_sub(intersect_range.clone(), args.start_addr);
+        output_buf[range_index(output_rel_intersection)]
+            .copy_from_slice(&block.payload()[range_index(block_rel_intersection)]);
+    }
+    let mut output = File::create(&args.output).context("Failed to create output file")?;
+    output
+        .write_all(&output_buf)
+        .context("Failed to write to output file")?;
     Ok(())
 }
 
@@ -367,5 +482,6 @@ fn main() -> anyhow::Result<()> {
         ClifArgs::Combine(args) => combine(args),
         ClifArgs::Generate(args) => generate(args),
         ClifArgs::Read(args) => read(args),
+        ClifArgs::Extract(args) => extract(args),
     }
 }

@@ -1,3 +1,4 @@
+use crate::parse_multibase_u32;
 use std::collections::HashMap;
 use std::sync::LazyLock;
 
@@ -8,29 +9,15 @@ pub struct Family {
     pub description: &'static str,
 }
 
-const fn u32_from_hex(s: &str) -> u32 {
-    let bytes = s.as_bytes();
-    let mut i = 2;
-    let mut val = 0u32;
-    while i < bytes.len() {
-        let b = bytes[i];
-        val = match b {
-            b'0'..=b'9' => val * 16 + (b - b'0') as u32,
-            b'a'..=b'f' => val * 16 + (10 + b - b'a') as u32,
-            b'A'..=b'F' => val * 16 + (10 + b - b'A') as u32,
-            _ => break,
-        };
-        i += 1;
-    }
-    val
-}
-
 macro_rules! families {
     ( $( { "id": $id:expr, "short_name": $sn:expr, "description": $desc:expr } ),* $(,)? ) => {
         &[
             $(
                 Family {
-                    id: u32_from_hex($id),
+                    id: match parse_multibase_u32($id) {
+                        Ok(val) => val,
+                        Err(_) => panic!("Unparseable id value"),
+                    },
                     short_name: $sn,
                     description: $desc,
                 },
