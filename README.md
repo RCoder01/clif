@@ -6,13 +6,12 @@ Simple tool for working with uf2 files
 Usage: clif <COMMAND>
 
 Commands:
-  combine   Combine multiple uf2 files into one
-  generate  Generate a uf2 from an arbitrary binary file
-  read      Read uf2 block metadata
-  help      Print this message or the help of the given subcommand(s)
-
-Options:
-  -h, --help  Print help
+  combine        Combine multiple uf2 files into one
+  generate       Generate a uf2 from an arbitrary binary file
+  read           Read uf2 block metadata
+  extract        Extract binary data from uf2 files
+  list-families  List known family names
+  help           Print this message or the help of the given subcommand(s)
 ```
 
 [UF2](https://github.com/microsoft/uf2) is a file format used to flash microcontrllers

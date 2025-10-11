@@ -5,9 +5,9 @@ use std::io::{BufReader, BufWriter, Read, Write};
 use std::num::ParseIntError;
 use std::ops::Range;
 
-use anyhow::{ensure, Context as _};
+use anyhow::{anyhow, ensure, Context as _};
 
-use crate::families::FAMILY_MAP;
+use crate::families::{Family, FAMILIES, FAMILY_MAP};
 
 mod families;
 
@@ -21,6 +21,8 @@ enum ClifArgs {
     Generate(GenerateArgs),
     Read(ReadArgs),
     Extract(ExtractArgs),
+    /// List known family names
+    ListFamilies,
 }
 
 /// Combine multiple uf2 files into one
@@ -40,7 +42,7 @@ struct GenerateArgs {
     output: String,
     #[arg(short, long, default_value_t = 1, value_parser=parse_multibase_u32)]
     page_size: u32,
-    #[arg(short, long, value_parser=parse_multibase_u32)]
+    #[arg(short, long, value_parser=parse_family)]
     family: Option<u32>,
     #[arg(short, long, default_value_t = 0, value_parser=parse_multibase_u32)]
     target_addr_start: u32,
@@ -93,6 +95,28 @@ pub const fn parse_multibase_u32(s: &str) -> Result<u32, ParseIntError> {
 pub const fn parse_multibase_u8(s: &str) -> Result<u8, ParseIntError> {
     let (val, radix) = split_radix(s);
     u8::from_str_radix(val, radix)
+}
+
+fn get_exec_name() -> Option<String> {
+    std::env::current_exe()
+        .ok()
+        .and_then(|pb| pb.file_name().map(|s| s.to_os_string()))
+        .and_then(|s| s.into_string().ok())
+}
+
+pub fn parse_family(s: &str) -> Result<u32, anyhow::Error> {
+    if let Ok(val) = parse_multibase_u32(s) {
+        return Ok(val);
+    }
+    for Family { short_name, id, .. } in FAMILIES {
+        if *short_name == s {
+            return Ok(*id);
+        }
+    }
+    Err(anyhow!(
+        "Unexpected family {s}, use {} list-families to see all known family names",
+        get_exec_name().unwrap_or("clif".to_string())
+    ))
 }
 
 #[derive(Clone, Debug)]
@@ -347,8 +371,8 @@ fn write_extension(
 
 fn combine(args: CombineArgs) -> anyhow::Result<()> {
     let mut output =
-        BufWriter::new(File::create(args.output).context("Failed to create output file")?);
-    for file in args.inputs {
+        BufWriter::new(File::create(&args.output).context("Failed to create output file")?);
+    for file in &args.inputs {
         let mut input = BufReader::new(
             File::open(&file).with_context(|| format!("Failed to open input file {file}"))?,
         );
@@ -356,6 +380,11 @@ fn combine(args: CombineArgs) -> anyhow::Result<()> {
             format!("Failed to copy data from input file {file} to output file")
         })?;
     }
+    println!(
+        "Wrote {} by combining {} input files",
+        args.output,
+        args.inputs.len()
+    );
     Ok(())
 }
 
@@ -382,7 +411,7 @@ fn generate(mut args: GenerateArgs) -> anyhow::Result<()> {
     }
     block.target_addr = args.target_addr_start;
     let mut output =
-        BufWriter::new(File::create(args.output).context("Failed to create output file")?);
+        BufWriter::new(File::create(&args.output).context("Failed to create output file")?);
     while len > 0 {
         if len < payload_size {
             block.payload_size = len;
@@ -397,6 +426,7 @@ fn generate(mut args: GenerateArgs) -> anyhow::Result<()> {
         block.block_no += 1;
         block.target_addr += block.payload_size;
     }
+    println!("{} written with {} block(s)", args.output, block.num_blocks);
     Ok(())
 }
 
@@ -477,11 +507,24 @@ fn extract(args: ExtractArgs) -> anyhow::Result<()> {
     Ok(())
 }
 
+fn list_families() -> anyhow::Result<()> {
+    for Family {
+        id,
+        short_name,
+        description,
+    } in FAMILIES
+    {
+        println!("{short_name} (0x{id:08X}): {description}");
+    }
+    Ok(())
+}
+
 fn main() -> anyhow::Result<()> {
     match ClifArgs::parse() {
         ClifArgs::Combine(args) => combine(args),
         ClifArgs::Generate(args) => generate(args),
         ClifArgs::Read(args) => read(args),
         ClifArgs::Extract(args) => extract(args),
+        ClifArgs::ListFamilies => list_families(),
     }
 }
