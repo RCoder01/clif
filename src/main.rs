@@ -144,7 +144,7 @@ impl UF2Block {
             target_addr: 0,
             payload_size,
             block_no: 0,
-            num_blocks: (len + 1) / payload_size,
+            num_blocks: (len + payload_size - 1) / payload_size,
             file_size: len,
             data: [0; MAX_PAYLOAD_SIZE],
         }
@@ -304,7 +304,7 @@ fn display_block(
                     }
                     break 'extension_tags;
                 }
-                let ext_type = u32::from_le_bytes(rem[..4].try_into().unwrap()) & 0x00_FF_FF_FF;
+                let ext_type = u32::from_le_bytes(rem[..4].try_into().unwrap()) >> 8;
 
                 if ext_len == 0 && ext_type == 0 {
                     break 'extension_tags;
@@ -366,7 +366,7 @@ fn write_extension(
             }
         }
         _ => {
-            writeln!(w, "extension type 0x{ext_type:06X}: {ext_data:?}")
+            writeln!(w, "extension type {ext_type:#06X}: {ext_data:?}")
         }
     }
 }
