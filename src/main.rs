@@ -5,9 +5,9 @@ use std::io::{BufReader, BufWriter, Read, Write};
 use std::num::ParseIntError;
 use std::ops::Range;
 
-use anyhow::{anyhow, ensure, Context as _};
+use anyhow::{Context as _, anyhow, ensure};
 
-use crate::families::{Family, FAMILIES, FAMILY_MAP};
+use crate::families::{FAMILIES, FAMILY_MAP, Family};
 
 mod families;
 
@@ -46,6 +46,8 @@ struct GenerateArgs {
     family: Option<u32>,
     #[arg(short, long, default_value_t = 0, value_parser=parse_multibase_u32)]
     target_addr_start: u32,
+    #[arg(short, long, value_parser=parse_multibase_u8)]
+    fill: Option<u8>,
 }
 
 /// Read uf2 block metadata
@@ -399,11 +401,13 @@ fn generate(mut args: GenerateArgs) -> anyhow::Result<()> {
     if args.page_size > MAX_PAYLOAD_SIZE as u32 {
         args.page_size = 1;
     }
-    ensure!(
-        len.is_multiple_of(args.page_size),
-        "Cannot write binary of len: {len} to device with page size: {}",
-        args.page_size
-    );
+    if args.fill.is_none() {
+        ensure!(
+            len.is_multiple_of(args.page_size),
+            "Cannot write binary of len: {len} to device with page size: {} (use fill arg to pad to page size)",
+            args.page_size
+        );
+    }
     let payload_size = args.page_size * (MAX_PAYLOAD_SIZE as u32 / args.page_size);
     let mut block = UF2Block::new(payload_size, len);
     if let Some(family) = args.family {
@@ -420,6 +424,23 @@ fn generate(mut args: GenerateArgs) -> anyhow::Result<()> {
         input
             .read_exact(&mut block.data[..block.payload_size as usize])
             .context("Failed to read UF2 Block data from input")?;
+
+        if let Some(fill) = args.fill
+            && !block.payload_size.is_multiple_of(args.page_size)
+        {
+            assert_eq!(len, 0);
+            let curr_size = block.payload_size;
+            let next_size = curr_size.next_multiple_of(args.page_size);
+            assert!(next_size < MAX_PAYLOAD_SIZE as u32);
+            block.data[curr_size as usize..next_size as usize].fill(fill);
+            block.payload_size = next_size;
+            println!(
+                "Filled {} bytes with [{:#04X}]",
+                next_size - curr_size,
+                fill
+            );
+        }
+
         output
             .write_all(&block.as_chunk())
             .context("Failed to write UF2 block to output")?;
